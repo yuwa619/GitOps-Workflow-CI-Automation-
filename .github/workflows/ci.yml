@@ -1,4 +1,5 @@
 name: CI
+
 on:
   push:
     branches:
@@ -7,6 +8,11 @@ on:
   pull_request:
     branches:
       - main
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
 jobs:
   build-test:
     runs-on: ubuntu-latest
@@ -16,17 +22,88 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-      
+          python-version: "3.10"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: lint
+      - name: Lint
+        run: flake8 app.py test_app.py
+
+      - name: Test
+        run: pytest test_app.py -v
+
+  trello:
+    needs: build-test
+    runs-on: ubuntu-latest
+    if: ${{ success() && github.event_name == 'pull_request' }}
+    steps:
+      - name: Create Trello card if missing, then move to Review/QA
+        env:
+          TRELLO_KEY: ${{ secrets.TRELLO_KEY }}
+          TRELLO_TOKEN: ${{ secrets.TRELLO_TOKEN }}
+          TRELLO_BOARD_ID: ${{ secrets.TRELLO_BOARD_ID }}
+          LIST_BACKLOG: ${{ secrets.TRELLO_LIST_BACKLOG }}
+          LIST_REVIEW_QA: ${{ secrets.TRELLO_LIST_REVIEW_QA }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
-          flake8 app.py test_app.py
-      
-      - name: test
-        run: |
-          pytest test_app.py -v
+          set -euo pipefail
+
+          # Fetch existing cards (we'll match by PR URL in card description)
+          CARDS_JSON="$(curl -sS \
+            "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards?fields=name,desc&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
+
+          # Try to find an existing card that already references this PR URL
+          CARD_ID="$(echo "$CARDS_JSON" | python - <<'PY'
+import os, sys, json
+pr_url = os.environ["PR_URL"]
+cards = json.load(sys.stdin)
+for c in cards:
+    if pr_url in (c.get("desc") or ""):
+        print(c["id"])
+        break
+PY
+)"
+          CARD_ID="${CARD_ID:-}"
+
+          if [ -z "$CARD_ID" ]; then
+            # Generate next TRELLO-### by scanning existing card names
+            NEXT_NUM="$(echo "$CARDS_JSON" | python - <<'PY'
+import sys, json, re
+cards = json.load(sys.stdin)
+mx = 0
+for c in cards:
+    m = re.search(r'\bTRELLO-(\d+)\b', c.get("name",""))
+    if m:
+        mx = max(mx, int(m.group(1)))
+print(mx + 1)
+PY
+)"
+            TID="TRELLO-$(printf '%03d' "$NEXT_NUM")"
+            CARD_NAME="${TID} - ${PR_TITLE}"
+            CARD_DESC="Auto-created by GitHub Actions.\nPR: ${PR_URL}\nRepo: ${REPO}\nPR#: ${PR_NUMBER}\n"
+
+            # Create the card in Backlog
+            CARD_ID="$(curl -sS -X POST \
+              --data-urlencode "idList=${LIST_BACKLOG}" \
+              --data-urlencode "name=${CARD_NAME}" \
+              --data-urlencode "desc=${CARD_DESC}" \
+              "https://api.trello.com/1/cards?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+              | python -c "import sys,json; print(json.load(sys.stdin)['id'])")"
+
+            echo "Created Trello card: $CARD_NAME ($CARD_ID)"
+          else
+            echo "Found existing Trello card for PR: $CARD_ID"
+          fi
+
+          # Move the card to Review/QA (because CI succeeded)
+          curl -sS -X PUT \
+            "https://api.trello.com/1/cards/${CARD_ID}?idList=${LIST_REVIEW_QA}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+            > /dev/null
+
+          echo "Moved Trello card to Review/QA."
