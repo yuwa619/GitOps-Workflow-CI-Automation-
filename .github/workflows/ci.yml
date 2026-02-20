@@ -67,7 +67,7 @@ jobs:
             CLEAN_TITLE="$(echo "$PR_TITLE" | python3 -c "
           import sys,re
           t=sys.stdin.read().strip()
-          t=re.sub(r'^TRELLO-\d+\s*[-–]\s*','',t,flags=re.IGNORECASE)
+          t=re.sub(r'^TRELLO-\d+\s*[-]\s*','',t,flags=re.IGNORECASE)
           print(t)
             ")"
 
@@ -102,7 +102,7 @@ jobs:
           else
             TRIGGER="PR ${EVENT_ACTION}"
           fi
-          COMMENT="🔄 *Moved to In Progress on ${EVENT_DATE}*\n\n**Trigger:** ${TRIGGER}\n**PR:** [#${PR_NUMBER}](${PR_URL})\n**Repo:** ${REPO}"
+          COMMENT="Moved to In Progress on ${EVENT_DATE} | Trigger: ${TRIGGER} | PR: #${PR_NUMBER} ${PR_URL}"
 
           curl -sS -X POST \
             --data-urlencode "text=${COMMENT}" \
@@ -180,7 +180,7 @@ jobs:
           # Post a comment explaining why it left In Progress
           EVENT_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
           SHORT_SHA="${COMMIT_SHA:0:7}"
-          COMMENT="✅ *Moved to Review/QA on ${EVENT_DATE}*\n\n**Reason:** All CI checks passed\n**Commit:** \`${SHORT_SHA}\`\n**CI Run:** [View run](${RUN_URL})\n**PR:** [#${PR_NUMBER}](${PR_URL})"
+          COMMENT="CI PASSED - Moved to Review/QA on ${EVENT_DATE} | Commit: ${SHORT_SHA} | Run: ${RUN_URL} | PR: #${PR_NUMBER} ${PR_URL}"
 
           curl -sS -X POST \
             --data-urlencode "text=${COMMENT}" \
@@ -211,7 +211,7 @@ jobs:
           set -euo pipefail
 
           CARDS_JSON="$(curl -sS \
-            "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards?fields=name,desc,idLabels&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
+            "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards?fields=name,desc&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
 
           CARD_ID="$(echo "$CARDS_JSON" | python3 -c "
           import os,sys,json
@@ -231,38 +231,42 @@ jobs:
             > /dev/null
           echo "Moved card back to In Progress (CI failed)."
 
-          # 2. Find or create a red label named "❌ CI Failed" on the board
+          # 2. Find or create red label, apply to card
           LABELS_JSON="$(curl -sS \
             "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?fields=id,name,color&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
 
           RED_LABEL_ID="$(echo "$LABELS_JSON" | python3 -c "
           import sys,json
           labels=json.load(sys.stdin)
-          print(next((l['id'] for l in labels if l.get('color')=='red' and l.get('name')=='❌ CI Failed'), ''))
+          match=[l['id'] for l in labels if l.get('color')=='red' and l.get('name')=='CI Failed']
+          print(match[0] if match else '')
           ")"
 
           if [ -z "$RED_LABEL_ID" ]; then
-            RED_LABEL_ID="$(curl -sS -X POST \
-              --data-urlencode "name=❌ CI Failed" \
-              --data-urlencode "color=red" \
-              --data-urlencode "idBoard=${TRELLO_BOARD_ID}" \
-              "https://api.trello.com/1/labels?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
-              | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")"
-            echo "Created red label: $RED_LABEL_ID"
+            RED_LABEL_ID="$(curl -sS -X PUT \
+              "https://api.trello.com/1/labels/$(echo "$LABELS_JSON" | python3 -c "
+          import sys,json
+          labels=json.load(sys.stdin)
+          match=[l['id'] for l in labels if l.get('color')=='red']
+          print(match[0] if match else '')
+              ")?name=CI+Failed&color=red&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))")"
+            echo "Renamed existing red label: $RED_LABEL_ID"
           else
-            echo "Found existing red label: $RED_LABEL_ID"
+            echo "Found red label: $RED_LABEL_ID"
           fi
 
-          # 3. Apply the red label to the card
-          curl -sS -X POST \
-            "https://api.trello.com/1/cards/${CARD_ID}/idLabels?value=${RED_LABEL_ID}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
-            > /dev/null
-          echo "Applied red label to card."
+          if [ -n "$RED_LABEL_ID" ]; then
+            curl -sS -X POST \
+              "https://api.trello.com/1/cards/${CARD_ID}/idLabels?value=${RED_LABEL_ID}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+              > /dev/null 2>&1 || true
+            echo "Applied red label to card."
+          fi
 
-          # 4. Post CI failure comment
+          # 3. Post CI failure comment
           EVENT_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
           SHORT_SHA="${COMMIT_SHA:0:7}"
-          COMMENT="❌ *Moved back to In Progress on ${EVENT_DATE}*\n\n**Reason:** CI checks failed on commit \`${SHORT_SHA}\`\n**CI Run:** [View failed run](${RUN_URL})\n**PR:** [#${PR_NUMBER}](${PR_URL})"
+          COMMENT="CI FAILED - Moved back to In Progress on ${EVENT_DATE} | Commit: ${SHORT_SHA} | Run: ${RUN_URL} | PR: #${PR_NUMBER} ${PR_URL}"
 
           curl -sS -X POST \
             --data-urlencode "text=${COMMENT}" \
@@ -313,34 +317,38 @@ jobs:
             > /dev/null
           echo "Moved card to Done."
 
-          # 2. Get all board labels
+          # 2. Get board labels
           LABELS_JSON="$(curl -sS \
             "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?fields=id,name,color&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
 
-          # 3. Find or create green "✅ Completed" label
+          # 3. Find or rename an existing green label to "Completed"
           GREEN_LABEL_ID="$(echo "$LABELS_JSON" | python3 -c "
           import sys,json
           labels=json.load(sys.stdin)
-          print(next((l['id'] for l in labels if l.get('color')=='green' and l.get('name')=='✅ Completed'), ''))
+          match=[l['id'] for l in labels if l.get('color')=='green' and l.get('name')=='Completed']
+          print(match[0] if match else '')
           ")"
 
           if [ -z "$GREEN_LABEL_ID" ]; then
-            GREEN_LABEL_ID="$(curl -sS -X POST \
-              --data-urlencode "name=✅ Completed" \
-              --data-urlencode "color=green" \
-              --data-urlencode "idBoard=${TRELLO_BOARD_ID}" \
-              "https://api.trello.com/1/labels?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
-              | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")"
-            echo "Created green label: $GREEN_LABEL_ID"
+            GREEN_LABEL_ID="$(curl -sS -X PUT \
+              "https://api.trello.com/1/labels/$(echo "$LABELS_JSON" | python3 -c "
+          import sys,json
+          labels=json.load(sys.stdin)
+          match=[l['id'] for l in labels if l.get('color')=='green']
+          print(match[0] if match else '')
+              ")?name=Completed&color=green&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))")"
+            echo "Renamed existing green label: $GREEN_LABEL_ID"
           else
-            echo "Found existing green label: $GREEN_LABEL_ID"
+            echo "Found green label: $GREEN_LABEL_ID"
           fi
 
-          # 4. Remove red "❌ CI Failed" label if present, then apply green label
+          # 4. Remove red CI-failed label from card if present
           RED_LABEL_ID="$(echo "$LABELS_JSON" | python3 -c "
           import sys,json
           labels=json.load(sys.stdin)
-          print(next((l['id'] for l in labels if l.get('color')=='red' and l.get('name')=='❌ CI Failed'), ''))
+          match=[l['id'] for l in labels if l.get('color')=='red' and l.get('name')=='CI Failed']
+          print(match[0] if match else '')
           ")"
 
           if [ -n "$RED_LABEL_ID" ]; then
@@ -350,14 +358,17 @@ jobs:
             echo "Removed red CI Failed label."
           fi
 
-          curl -sS -X POST \
-            "https://api.trello.com/1/cards/${CARD_ID}/idLabels?value=${GREEN_LABEL_ID}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
-            > /dev/null
-          echo "Applied green label to card."
+          # 5. Apply green label
+          if [ -n "$GREEN_LABEL_ID" ]; then
+            curl -sS -X POST \
+              "https://api.trello.com/1/cards/${CARD_ID}/idLabels?value=${GREEN_LABEL_ID}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+              > /dev/null 2>&1 || true
+            echo "Applied green label to card."
+          fi
 
-          # 4. Post a merge comment on the card
+          # 6. Post a merge comment on the card
           MERGE_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
-          COMMENT="✅ *Merged on ${MERGE_DATE}*\n\n**PR:** [#${PR_NUMBER} - ${PR_TITLE}](${PR_URL})\n**Merged by:** @${MERGED_BY}\n**Repo:** ${REPO}"
+          COMMENT="MERGED on ${MERGE_DATE} | PR: #${PR_NUMBER} - ${PR_TITLE} ${PR_URL} | Merged by: @${MERGED_BY} | Repo: ${REPO}"
 
           curl -sS -X POST \
             --data-urlencode "text=${COMMENT}" \
