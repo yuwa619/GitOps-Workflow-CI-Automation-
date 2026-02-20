@@ -30,10 +30,12 @@ jobs:
           pip install -r requirements.txt
 
       - name: Lint
-        run: flake8 app.py test_app.py
+        run: |
+          flake8 app.py test_app.py
 
       - name: Test
-        run: pytest test_app.py -v
+        run: |
+          pytest test_app.py -v
 
   trello:
     needs: build-test
@@ -54,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Fetch existing cards (we'll match by PR URL in card description)
+          # Fetch existing cards (match by PR URL in card description)
           CARDS_JSON="$(curl -sS \
             "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards?fields=name,desc&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
 
@@ -88,7 +90,6 @@ PY
             CARD_NAME="${TID} - ${PR_TITLE}"
             CARD_DESC="Auto-created by GitHub Actions.\nPR: ${PR_URL}\nRepo: ${REPO}\nPR#: ${PR_NUMBER}\n"
 
-            # Create the card in Backlog
             CARD_ID="$(curl -sS -X POST \
               --data-urlencode "idList=${LIST_BACKLOG}" \
               --data-urlencode "name=${CARD_NAME}" \
@@ -101,7 +102,7 @@ PY
             echo "Found existing Trello card for PR: $CARD_ID"
           fi
 
-          # Move the card to Review/QA (because CI succeeded)
+          # Move card to Review/QA (CI passed)
           curl -sS -X PUT \
             "https://api.trello.com/1/cards/${CARD_ID}?idList=${LIST_REVIEW_QA}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
             > /dev/null
