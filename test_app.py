@@ -46,3 +46,15 @@ def test_reverse_single_char(client):
 def test_sum_missing_keys_defaults_to_zero(client):
     res = client.post('/sum', json={})
     assert res.get_json()["result"] == 0
+
+
+def test_sum_invalid_types_returns_400(client):
+    res = client.post('/sum', json={"a": "foo", "b": 10})
+    assert res.status_code == 400
+    assert "error" in res.get_json()
+
+
+def test_reverse_invalid_type_returns_400(client):
+    res = client.post('/reverse-string', json={"text": 123})
+    assert res.status_code == 400
+    assert "error" in res.get_json()
