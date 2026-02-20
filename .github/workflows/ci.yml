@@ -38,6 +38,8 @@ jobs:
           PR_URL:            ${{ github.event.pull_request.html_url }}
           PR_NUMBER:         ${{ github.event.pull_request.number }}
           REPO:              ${{ github.repository }}
+          EVENT_ACTION:      ${{ github.event.action }}
+          COMMIT_SHA:        ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
 
@@ -60,7 +62,16 @@ jobs:
             ")"
 
             TID="TRELLO-$(printf '%03d' "$NEXT_NUM")"
-            CARD_NAME="${TID} - ${PR_TITLE}"
+
+            # Strip any existing TRELLO-XXX prefix from the PR title to avoid double prefixing
+            CLEAN_TITLE="$(echo "$PR_TITLE" | python3 -c "
+          import sys,re
+          t=sys.stdin.read().strip()
+          t=re.sub(r'^TRELLO-\d+\s*[-–]\s*','',t,flags=re.IGNORECASE)
+          print(t)
+            ")"
+
+            CARD_NAME="${TID} - ${CLEAN_TITLE}"
             CARD_DESC="Auto-created by GitHub Actions.\nPR: ${PR_URL}\nRepo: ${REPO}\nPR#: ${PR_NUMBER}"
 
             # Create in Backlog first
@@ -80,6 +91,24 @@ jobs:
             "https://api.trello.com/1/cards/${CARD_ID}?idList=${LIST_IN_PROGRESS}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
             > /dev/null
           echo "Moved card to In Progress."
+
+          # Post an In Progress comment
+          EVENT_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          if [ "$EVENT_ACTION" = "opened" ]; then
+            TRIGGER="PR #${PR_NUMBER} opened"
+          elif [ "$EVENT_ACTION" = "synchronize" ]; then
+            TRIGGER="new commit pushed (${SHORT_SHA})"
+          else
+            TRIGGER="PR ${EVENT_ACTION}"
+          fi
+          COMMENT="🔄 *Moved to In Progress on ${EVENT_DATE}*\n\n**Trigger:** ${TRIGGER}\n**PR:** [#${PR_NUMBER}](${PR_URL})\n**Repo:** ${REPO}"
+
+          curl -sS -X POST \
+            --data-urlencode "text=${COMMENT}" \
+            "https://api.trello.com/1/cards/${CARD_ID}/actions/comments?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+            > /dev/null
+          echo "Posted In Progress comment."
 
   # ── 2. Build & test ────────────────────────────────────────────────────────
   build-test:
@@ -104,7 +133,7 @@ jobs:
       - name: Test
         run: pytest test_app.py -v
 
-  # ── 3. CI passed → Review/QA ───────────────────────────────────────────────
+  # ── 3. CI passed → Review/QA + comment ────────────────────────────────────
   trello-review-qa:
     needs: build-test
     runs-on: ubuntu-latest
@@ -113,13 +142,17 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.action != 'closed'
     steps:
-      - name: Move card to Review/QA
+      - name: Move card to Review/QA and post CI passed comment
         env:
           TRELLO_KEY:      ${{ secrets.TRELLO_KEY }}
           TRELLO_TOKEN:    ${{ secrets.TRELLO_TOKEN }}
           TRELLO_BOARD_ID: ${{ secrets.TRELLO_BOARD_ID }}
           LIST_REVIEW_QA:  ${{ secrets.TRELLO_LIST_REVIEW_QA }}
           PR_URL:          ${{ github.event.pull_request.html_url }}
+          PR_NUMBER:       ${{ github.event.pull_request.number }}
+          COMMIT_SHA:      ${{ github.event.pull_request.head.sha }}
+          REPO:            ${{ github.repository }}
+          RUN_URL:         ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
 
@@ -138,12 +171,24 @@ jobs:
             exit 0
           fi
 
+          # Move to Review/QA
           curl -sS -X PUT \
             "https://api.trello.com/1/cards/${CARD_ID}?idList=${LIST_REVIEW_QA}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
             > /dev/null
           echo "Moved card to Review/QA."
 
-  # ── 4. CI failed → back to In Progress ────────────────────────────────────
+          # Post a comment explaining why it left In Progress
+          EVENT_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          COMMENT="✅ *Moved to Review/QA on ${EVENT_DATE}*\n\n**Reason:** All CI checks passed\n**Commit:** \`${SHORT_SHA}\`\n**CI Run:** [View run](${RUN_URL})\n**PR:** [#${PR_NUMBER}](${PR_URL})"
+
+          curl -sS -X POST \
+            --data-urlencode "text=${COMMENT}" \
+            "https://api.trello.com/1/cards/${CARD_ID}/actions/comments?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+            > /dev/null
+          echo "Posted Review/QA comment."
+
+  # ── 4. CI failed → back to In Progress + comment ──────────────────────────
   trello-ci-failed:
     needs: build-test
     runs-on: ubuntu-latest
@@ -159,6 +204,9 @@ jobs:
           TRELLO_BOARD_ID:  ${{ secrets.TRELLO_BOARD_ID }}
           LIST_IN_PROGRESS: ${{ secrets.TRELLO_LIST_IN_PROGRESS }}
           PR_URL:           ${{ github.event.pull_request.html_url }}
+          PR_NUMBER:        ${{ github.event.pull_request.number }}
+          COMMIT_SHA:       ${{ github.event.pull_request.head.sha }}
+          RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
 
@@ -181,6 +229,16 @@ jobs:
             "https://api.trello.com/1/cards/${CARD_ID}?idList=${LIST_IN_PROGRESS}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
             > /dev/null
           echo "Moved card back to In Progress (CI failed)."
+
+          EVENT_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          COMMENT="❌ *Moved back to In Progress on ${EVENT_DATE}*\n\n**Reason:** CI checks failed on commit \`${SHORT_SHA}\`\n**CI Run:** [View failed run](${RUN_URL})\n**PR:** [#${PR_NUMBER}](${PR_URL})"
+
+          curl -sS -X POST \
+            --data-urlencode "text=${COMMENT}" \
+            "https://api.trello.com/1/cards/${CARD_ID}/actions/comments?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+            > /dev/null
+          echo "Posted CI failure comment."
 
   # ── 5. PR merged → Done + green label + merge comment ─────────────────────
   trello-done:
