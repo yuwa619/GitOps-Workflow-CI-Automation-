@@ -1,6 +1,8 @@
 # GitOps Workflow & CI Automation
 
 ![CI](https://github.com/yuwa619/GitOps-Workflow-CI-Automation-/actions/workflows/ci.yml/badge.svg)
+![Python](https://img.shields.io/badge/python-3.10-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 A lightweight internal service demonstrating a production-style GitOps workflow connecting **Trello**, **GitHub**, and **GitHub Actions** — with automated linting, testing, and Trello card lifecycle management.
 
