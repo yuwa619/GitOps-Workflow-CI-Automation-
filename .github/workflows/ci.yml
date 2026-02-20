@@ -182,7 +182,7 @@ jobs:
             > /dev/null
           echo "Moved card back to In Progress (CI failed)."
 
-  # ── 5. PR merged → Done ────────────────────────────────────────────────────
+  # ── 5. PR merged → Done + green label + merge comment ─────────────────────
   trello-done:
     runs-on: ubuntu-latest
     if: >
@@ -190,13 +190,17 @@ jobs:
       github.event.action == 'closed' &&
       github.event.pull_request.merged == true
     steps:
-      - name: Move card to Done
+      - name: Move card to Done, add green label and merge comment
         env:
           TRELLO_KEY:      ${{ secrets.TRELLO_KEY }}
           TRELLO_TOKEN:    ${{ secrets.TRELLO_TOKEN }}
           TRELLO_BOARD_ID: ${{ secrets.TRELLO_BOARD_ID }}
           LIST_DONE:       ${{ secrets.TRELLO_LIST_DONE }}
           PR_URL:          ${{ github.event.pull_request.html_url }}
+          PR_NUMBER:       ${{ github.event.pull_request.number }}
+          PR_TITLE:        ${{ github.event.pull_request.title }}
+          MERGED_BY:       ${{ github.event.pull_request.merged_by.login }}
+          REPO:            ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -215,7 +219,46 @@ jobs:
             exit 0
           fi
 
+          # 1. Move card to Done
           curl -sS -X PUT \
             "https://api.trello.com/1/cards/${CARD_ID}?idList=${LIST_DONE}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
             > /dev/null
           echo "Moved card to Done."
+
+          # 2. Find or create a green label named "✅ Completed" on the board
+          LABELS_JSON="$(curl -sS \
+            "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?fields=id,name,color&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
+
+          LABEL_ID="$(echo "$LABELS_JSON" | python3 -c "
+          import sys,json
+          labels=json.load(sys.stdin)
+          print(next((l['id'] for l in labels if l.get('color')=='green' and l.get('name')=='✅ Completed'), ''))
+          ")"
+
+          if [ -z "$LABEL_ID" ]; then
+            LABEL_ID="$(curl -sS -X POST \
+              --data-urlencode "name=✅ Completed" \
+              --data-urlencode "color=green" \
+              --data-urlencode "idBoard=${TRELLO_BOARD_ID}" \
+              "https://api.trello.com/1/labels?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")"
+            echo "Created green label: $LABEL_ID"
+          else
+            echo "Found existing green label: $LABEL_ID"
+          fi
+
+          # 3. Apply the green label to the card
+          curl -sS -X POST \
+            "https://api.trello.com/1/cards/${CARD_ID}/idLabels?value=${LABEL_ID}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+            > /dev/null
+          echo "Applied green label to card."
+
+          # 4. Post a merge comment on the card
+          MERGE_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          COMMENT="✅ *Merged on ${MERGE_DATE}*\n\n**PR:** [#${PR_NUMBER} - ${PR_TITLE}](${PR_URL})\n**Merged by:** @${MERGED_BY}\n**Repo:** ${REPO}"
+
+          curl -sS -X POST \
+            --data-urlencode "text=${COMMENT}" \
+            "https://api.trello.com/1/cards/${CARD_ID}/actions/comments?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+            > /dev/null
+          echo "Posted merge comment on card."
