@@ -56,36 +56,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Fetch existing cards (match by PR URL in card description)
-          CARDS_JSON="$(curl -sS \
-            "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards?fields=name,desc&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
+          CARDS_JSON="$(curl -sS "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards?fields=name,desc&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
 
-          # Try to find an existing card that already references this PR URL
-          CARD_ID="$(echo "$CARDS_JSON" | python - <<'PY'
-import os, sys, json
-pr_url = os.environ["PR_URL"]
-cards = json.load(sys.stdin)
-for c in cards:
-    if pr_url in (c.get("desc") or ""):
-        print(c["id"])
-        break
-PY
-)"
+          CARD_ID="$(echo "$CARDS_JSON" | python3 -c "import os,sys,json; pr=os.environ['PR_URL']; cards=json.load(sys.stdin); print(next((c['id'] for c in cards if pr in (c.get('desc') or '')), ''))")"
           CARD_ID="${CARD_ID:-}"
 
           if [ -z "$CARD_ID" ]; then
-            # Generate next TRELLO-### by scanning existing card names
-            NEXT_NUM="$(echo "$CARDS_JSON" | python - <<'PY'
-import sys, json, re
-cards = json.load(sys.stdin)
-mx = 0
-for c in cards:
-    m = re.search(r'\bTRELLO-(\d+)\b', c.get("name",""))
-    if m:
-        mx = max(mx, int(m.group(1)))
-print(mx + 1)
-PY
-)"
+            NEXT_NUM="$(echo "$CARDS_JSON" | python3 -c "import sys,json,re; cards=json.load(sys.stdin); nums=[int(m.group(1)) for c in cards for m in [re.search(r'TRELLO-(\d+)',c.get('name',''))] if m]; print(max(nums,default=0)+1)")"
+
             TID="TRELLO-$(printf '%03d' "$NEXT_NUM")"
             CARD_NAME="${TID} - ${PR_TITLE}"
             CARD_DESC="Auto-created by GitHub Actions.\nPR: ${PR_URL}\nRepo: ${REPO}\nPR#: ${PR_NUMBER}\n"
@@ -95,14 +73,13 @@ PY
               --data-urlencode "name=${CARD_NAME}" \
               --data-urlencode "desc=${CARD_DESC}" \
               "https://api.trello.com/1/cards?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
-              | python -c "import sys,json; print(json.load(sys.stdin)['id'])")"
+              | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")"
 
             echo "Created Trello card: $CARD_NAME ($CARD_ID)"
           else
             echo "Found existing Trello card for PR: $CARD_ID"
           fi
 
-          # Move card to Review/QA (CI passed)
           curl -sS -X PUT \
             "https://api.trello.com/1/cards/${CARD_ID}?idList=${LIST_REVIEW_QA}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
             > /dev/null
