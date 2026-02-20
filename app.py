@@ -30,4 +30,5 @@ def reverse_string():
 
 if __name__ == '__main__':
     app.run()
-x = 1+1  # noqa: intentional lint error - unused variable E302/W291
+
+import os
