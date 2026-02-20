@@ -188,7 +188,7 @@ jobs:
             > /dev/null
           echo "Posted Review/QA comment."
 
-  # ── 4. CI failed → back to In Progress + comment ──────────────────────────
+  # ── 4. CI failed → back to In Progress + red label + comment ─────────────
   trello-ci-failed:
     needs: build-test
     runs-on: ubuntu-latest
@@ -197,7 +197,7 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.action != 'closed'
     steps:
-      - name: Move card back to In Progress on CI failure
+      - name: Move card back to In Progress, add red label, post failure comment
         env:
           TRELLO_KEY:       ${{ secrets.TRELLO_KEY }}
           TRELLO_TOKEN:     ${{ secrets.TRELLO_TOKEN }}
@@ -211,7 +211,7 @@ jobs:
           set -euo pipefail
 
           CARDS_JSON="$(curl -sS \
-            "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards?fields=name,desc&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
+            "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards?fields=name,desc,idLabels&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
 
           CARD_ID="$(echo "$CARDS_JSON" | python3 -c "
           import os,sys,json
@@ -225,11 +225,41 @@ jobs:
             exit 0
           fi
 
+          # 1. Move card back to In Progress
           curl -sS -X PUT \
             "https://api.trello.com/1/cards/${CARD_ID}?idList=${LIST_IN_PROGRESS}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
             > /dev/null
           echo "Moved card back to In Progress (CI failed)."
 
+          # 2. Find or create a red label named "❌ CI Failed" on the board
+          LABELS_JSON="$(curl -sS \
+            "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?fields=id,name,color&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
+
+          RED_LABEL_ID="$(echo "$LABELS_JSON" | python3 -c "
+          import sys,json
+          labels=json.load(sys.stdin)
+          print(next((l['id'] for l in labels if l.get('color')=='red' and l.get('name')=='❌ CI Failed'), ''))
+          ")"
+
+          if [ -z "$RED_LABEL_ID" ]; then
+            RED_LABEL_ID="$(curl -sS -X POST \
+              --data-urlencode "name=❌ CI Failed" \
+              --data-urlencode "color=red" \
+              --data-urlencode "idBoard=${TRELLO_BOARD_ID}" \
+              "https://api.trello.com/1/labels?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")"
+            echo "Created red label: $RED_LABEL_ID"
+          else
+            echo "Found existing red label: $RED_LABEL_ID"
+          fi
+
+          # 3. Apply the red label to the card
+          curl -sS -X POST \
+            "https://api.trello.com/1/cards/${CARD_ID}/idLabels?value=${RED_LABEL_ID}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+            > /dev/null
+          echo "Applied red label to card."
+
+          # 4. Post CI failure comment
           EVENT_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
           SHORT_SHA="${COMMIT_SHA:0:7}"
           COMMENT="❌ *Moved back to In Progress on ${EVENT_DATE}*\n\n**Reason:** CI checks failed on commit \`${SHORT_SHA}\`\n**CI Run:** [View failed run](${RUN_URL})\n**PR:** [#${PR_NUMBER}](${PR_URL})"
@@ -283,31 +313,45 @@ jobs:
             > /dev/null
           echo "Moved card to Done."
 
-          # 2. Find or create a green label named "✅ Completed" on the board
+          # 2. Get all board labels
           LABELS_JSON="$(curl -sS \
             "https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?fields=id,name,color&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}")"
 
-          LABEL_ID="$(echo "$LABELS_JSON" | python3 -c "
+          # 3. Find or create green "✅ Completed" label
+          GREEN_LABEL_ID="$(echo "$LABELS_JSON" | python3 -c "
           import sys,json
           labels=json.load(sys.stdin)
           print(next((l['id'] for l in labels if l.get('color')=='green' and l.get('name')=='✅ Completed'), ''))
           ")"
 
-          if [ -z "$LABEL_ID" ]; then
-            LABEL_ID="$(curl -sS -X POST \
+          if [ -z "$GREEN_LABEL_ID" ]; then
+            GREEN_LABEL_ID="$(curl -sS -X POST \
               --data-urlencode "name=✅ Completed" \
               --data-urlencode "color=green" \
               --data-urlencode "idBoard=${TRELLO_BOARD_ID}" \
               "https://api.trello.com/1/labels?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
               | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")"
-            echo "Created green label: $LABEL_ID"
+            echo "Created green label: $GREEN_LABEL_ID"
           else
-            echo "Found existing green label: $LABEL_ID"
+            echo "Found existing green label: $GREEN_LABEL_ID"
           fi
 
-          # 3. Apply the green label to the card
+          # 4. Remove red "❌ CI Failed" label if present, then apply green label
+          RED_LABEL_ID="$(echo "$LABELS_JSON" | python3 -c "
+          import sys,json
+          labels=json.load(sys.stdin)
+          print(next((l['id'] for l in labels if l.get('color')=='red' and l.get('name')=='❌ CI Failed'), ''))
+          ")"
+
+          if [ -n "$RED_LABEL_ID" ]; then
+            curl -sS -X DELETE \
+              "https://api.trello.com/1/cards/${CARD_ID}/idLabels/${RED_LABEL_ID}?key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+              > /dev/null 2>&1 || true
+            echo "Removed red CI Failed label."
+          fi
+
           curl -sS -X POST \
-            "https://api.trello.com/1/cards/${CARD_ID}/idLabels?value=${LABEL_ID}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
+            "https://api.trello.com/1/cards/${CARD_ID}/idLabels?value=${GREEN_LABEL_ID}&key=${TRELLO_KEY}&token=${TRELLO_TOKEN}" \
             > /dev/null
           echo "Applied green label to card."
 
